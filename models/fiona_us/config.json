@@ -1,0 +1,11 @@
+{
+  "name": "Fiona (US)",
+  "description": "Soft, intimate, slightly breathy and flirtatious",
+  "voice_settings": {
+    "stability": 0.4,
+    "similarity_boost": 0.75,
+    "style": 0.6,
+    "use_speaker_boost": true
+  },
+  "voice_id": "oK1k46caT7fvsQbOfQKy"
+}

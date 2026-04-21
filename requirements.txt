@@ -1,0 +1,8 @@
+streamlit
+python-dotenv
+anthropic
+aiohttp
+aiofiles
+certifi
+elevenlabs
+Pillow

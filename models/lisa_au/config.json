@@ -1,0 +1,11 @@
+{
+  "name": "Lisa (AU)",
+  "description": "Playful, teasing, intimate Australian accent",
+  "voice_settings": {
+    "stability": 0.35,
+    "similarity_boost": 0.8,
+    "style": 0.65,
+    "use_speaker_boost": true
+  },
+  "voice_id": "M6MnbHKSWg9p1kqY0Dw7"
+}
