@@ -37,6 +37,7 @@ import generate_voices
 import generate_images
 import generate_variations
 import animate_batch
+import reel_pipeline
 
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Content Pipeline", page_icon="🎬", layout="wide")
@@ -391,6 +392,9 @@ _SS_DEFAULTS: dict = {
     # Tab 4: Reel Generator
     "rg_last_scene": "",    # tracks scene changes to reset selection
     "rg_sel":        {},    # {i: bool} — which pack images are selected for reels
+
+    # Tab 6: Instagram → AI Reel
+    "rp_jobs": [],          # list of job dicts, one per URL
 }
 
 for _k, _v in _SS_DEFAULTS.items():
@@ -412,12 +416,13 @@ mp_path       = Path("assets/master_prompt.txt")
 st.title("🎬 Content Pipeline")
 st.caption("Creators → Scenes → Scene Packs → Reels")
 
-T_CREATORS, T_BUILDER, T_VARS, T_REELS, T_HISTORY = st.tabs([
+T_CREATORS, T_BUILDER, T_VARS, T_REELS, T_HISTORY, T_REEL_PIPE = st.tabs([
     "👤 Creators",
     "🎨 Scene Builder",
     "✨ Scene Variations",
     "🎬 Reel Generator",
     "📋 History",
+    "🎥 Instagram → AI Reel",
 ])
 
 
@@ -1238,3 +1243,215 @@ with T_HISTORY:
                             mime="video/mp4",
                             key=f"hist_dl_{i}",
                         )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 6 — INSTAGRAM → AI REEL
+# ══════════════════════════════════════════════════════════════════════════════
+
+with T_REEL_PIPE:
+    st.header("🎥 Instagram → AI Reel")
+    st.caption(
+        "Paste Instagram reel URL(s) → extract scene → generate AI image → generate Kling video."
+    )
+    st.divider()
+
+    # ── Prerequisites check ───────────────────────────────────────────────────
+    _rp_missing = []
+    if not wavespeed_key: _rp_missing.append("WAVESPEED_API_KEY")
+    if not anthropic_key: _rp_missing.append("ANTHROPIC_API_KEY")
+    if _rp_missing:
+        st.error(f"Missing API keys: {', '.join(_rp_missing)}")
+        st.stop()
+
+    # ── Creator + inputs ──────────────────────────────────────────────────────
+    creators = load_creators()
+    rp_creator = st.selectbox("Creator (identity)", list(creators.keys()), key="rp_creator_sel")
+    rp_collage = resolve_collage(rp_creator)
+    if not rp_collage:
+        st.error(f"No collage for **{rp_creator}**. Add one in the Creators tab.")
+        st.stop()
+
+    st.markdown("**Instagram Reel URL(s)** — one per line")
+    rp_urls_raw = st.text_area(
+        "reel_urls",
+        placeholder="https://www.instagram.com/reel/ABC123/\nhttps://www.instagram.com/reel/XYZ456/",
+        height=120,
+        label_visibility="collapsed",
+        key="rp_urls_input",
+    )
+    rp_urls = [u.strip() for u in rp_urls_raw.splitlines() if u.strip()]
+
+    rp_duration = st.select_slider(
+        "Kling video duration (seconds)", options=[5, 10], value=5, key="rp_duration"
+    )
+
+    if rp_urls:
+        st.caption(f"✅ {len(rp_urls)} URL{'s' if len(rp_urls) > 1 else ''}")
+
+    st.divider()
+
+    # ── Run pipeline ──────────────────────────────────────────────────────────
+    if not rp_urls:
+        st.info("Paste at least one Instagram reel URL above.")
+    elif st.button(
+        f"🚀 Run Pipeline  ({len(rp_urls)} reel{'s' if len(rp_urls) > 1 else ''})",
+        type="primary", use_container_width=True, key="rp_run",
+    ):
+        master = mp_path.read_text(encoding="utf-8")
+        ss.rp_jobs = []
+
+        rp_base_dir = Path("output/reel_pipeline")
+        rp_base_dir.mkdir(parents=True, exist_ok=True)
+
+        for url_i, url in enumerate(rp_urls):
+            job_dir = rp_base_dir / f"job_{url_i:02d}"
+            job_dir.mkdir(parents=True, exist_ok=True)
+
+            job: dict = {"url": url, "error": None}
+            st.markdown(f"---\n#### Reel {url_i + 1} of {len(rp_urls)}")
+            st.caption(url)
+
+            # Step 1 — Download
+            with st.status("⬇️ Downloading reel…") as _s:
+                try:
+                    video_path = reel_pipeline.download_reel(url, job_dir / "download")
+                    job["video"] = video_path
+                    _s.update(label=f"✅ Downloaded — {video_path.name}", state="complete")
+                except Exception as e:
+                    job["error"] = f"Download failed: {e}"
+                    _s.update(label=f"❌ Download failed", state="error")
+                    st.error(job["error"])
+                    ss.rp_jobs.append(job)
+                    continue
+
+            # Step 2 — Extract first frame
+            with st.status("🖼️ Extracting first frame…") as _s:
+                try:
+                    frame_path = reel_pipeline.extract_first_frame(
+                        video_path, job_dir / "frame.jpg"
+                    )
+                    job["frame"] = frame_path
+                    _s.update(label="✅ Frame extracted", state="complete")
+                    st.image(str(frame_path), caption="First frame (scene reference)",
+                             width="stretch")
+                except Exception as e:
+                    job["error"] = f"Frame extraction failed: {e}"
+                    _s.update(label="❌ Frame extraction failed", state="error")
+                    st.error(job["error"])
+                    ss.rp_jobs.append(job)
+                    continue
+
+            # Step 3 — Generate prompt with Claude
+            with st.status("🤖 Generating prompt with Claude…") as _s:
+                try:
+                    filled_prompt = generate_images.fill_prompt_with_claude(
+                        rp_collage, frame_path, master
+                    )
+                    job["prompt"] = filled_prompt
+                    _s.update(label="✅ Prompt generated", state="complete")
+                    with st.expander("🔍 Prompt sent to Nano Banana"):
+                        _full_p = (filled_prompt
+                                   + generate_images._FACE_LOCK
+                                   + generate_images._IDENTITY_LOCK)
+                        st.caption(f"Identity: `{rp_collage}`  |  Scene ref: `{frame_path.name}`")
+                        st.caption(f"{len(_full_p)} chars")
+                        st.text(_full_p)
+                except Exception as e:
+                    job["error"] = f"Prompt generation failed: {e}"
+                    _s.update(label="❌ Prompt generation failed", state="error")
+                    st.error(job["error"])
+                    ss.rp_jobs.append(job)
+                    continue
+
+            # Step 4 — Generate AI image (Nano Banana)
+            with st.status("🍌 Generating AI image (Nano Banana)…") as _s:
+                try:
+                    ai_image_path = job_dir / "ai_image.jpg"
+                    generate_images.generate_base(
+                        rp_collage, frame_path, filled_prompt, ai_image_path
+                    )
+                    job["image"] = ai_image_path
+                    _s.update(label="✅ AI image generated", state="complete")
+                    st.image(str(ai_image_path), caption="Generated AI image",
+                             width="stretch")
+                except Exception as e:
+                    job["error"] = f"Nano Banana failed: {e}"
+                    _s.update(label="❌ Nano Banana failed", state="error")
+                    st.error(job["error"])
+                    ss.rp_jobs.append(job)
+                    continue
+
+            # Step 5 — Generate Kling video
+            with st.status("🎬 Generating Kling video…") as _s:
+                try:
+                    kling_out = job_dir / "kling_output.mp4"
+                    reel_pipeline.generate_kling_video(
+                        generated_image_path=ai_image_path,
+                        original_video_path=video_path,
+                        out_path=kling_out,
+                        duration=rp_duration,
+                    )
+                    job["video_out"] = kling_out
+                    _s.update(label="✅ Kling video ready", state="complete")
+                    st.video(str(kling_out))
+                except Exception as e:
+                    job["error"] = f"Kling failed: {e}"
+                    _s.update(label="❌ Kling failed", state="error")
+                    st.error(job["error"])
+                    ss.rp_jobs.append(job)
+                    continue
+
+            ss.rp_jobs.append(job)
+            st.success(f"✅ Reel {url_i + 1} complete!")
+
+    # ── Results + downloads ───────────────────────────────────────────────────
+    done_jobs = [j for j in ss.rp_jobs if j.get("video_out") and Path(j["video_out"]).exists()]
+    if done_jobs:
+        st.divider()
+        st.subheader(f"Results — {len(done_jobs)} reel{'s' if len(done_jobs) > 1 else ''} ready")
+
+        # Per-reel downloads
+        for i, job in enumerate(done_jobs):
+            c_img, c_vid = st.columns(2)
+            with c_img:
+                if job.get("image") and Path(job["image"]).exists():
+                    st.image(str(job["image"]), caption=f"AI image {i + 1}", width="stretch")
+                    with open(job["image"], "rb") as f:
+                        st.download_button(
+                            f"⬇️ Image {i + 1}",
+                            data=f.read(),
+                            file_name=f"ai_image_{i + 1:02d}.jpg",
+                            mime="image/jpeg",
+                            key=f"rp_dl_img_{i}",
+                        )
+            with c_vid:
+                st.video(str(job["video_out"]))
+                with open(job["video_out"], "rb") as f:
+                    st.download_button(
+                        f"⬇️ Video {i + 1}",
+                        data=f.read(),
+                        file_name=f"kling_reel_{i + 1:02d}.mp4",
+                        mime="video/mp4",
+                        key=f"rp_dl_vid_{i}",
+                    )
+
+        # Batch ZIP download
+        if len(done_jobs) > 1:
+            st.divider()
+            _zip_buf = io.BytesIO()
+            with zipfile.ZipFile(_zip_buf, "w", zipfile.ZIP_DEFLATED) as _zf:
+                for i, job in enumerate(done_jobs):
+                    if job.get("image") and Path(job["image"]).exists():
+                        _zf.write(job["image"], f"ai_image_{i + 1:02d}.jpg")
+                    if job.get("video_out") and Path(job["video_out"]).exists():
+                        _zf.write(job["video_out"], f"kling_reel_{i + 1:02d}.mp4")
+            st.download_button(
+                f"⬇️ Download all {len(done_jobs)} reels (.zip)",
+                data=_zip_buf.getvalue(),
+                file_name="ai_reels_batch.zip",
+                mime="application/zip",
+                use_container_width=True,
+                type="primary",
+                key="rp_dl_zip",
+            )

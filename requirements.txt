@@ -6,3 +6,4 @@ aiofiles
 certifi
 elevenlabs
 Pillow
+yt-dlp

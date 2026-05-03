@@ -22,7 +22,13 @@ def _media_type_from_bytes(path: Path) -> str:
         return "image/jpeg"
     if h[:4] == b"RIFF" and h[8:12] == b"WEBP":
         return "image/webp"
-    return "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
+    # MP4 / MOV — ftyp box starts at byte 4
+    if h[4:8] in (b"ftyp", b"moov", b"mdat"):
+        return "video/mp4"
+    ext = path.suffix.lower()
+    if ext in (".mp4", ".mov", ".m4v", ".webm"):
+        return "video/mp4"
+    return "image/png" if ext == ".png" else "image/jpeg"
 
 
 async def upload_file(session: aiohttp.ClientSession, path: Path, api_key: str) -> str:
