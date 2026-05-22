@@ -42,6 +42,32 @@ CREATORS = {
 ELEVENLABS_VOICE_ID = CREATORS["Fiona (US)"]["voice_id"]
 VOICE_SETTINGS = CREATORS["Fiona (US)"]["voice_settings"]
 
+# --- TIKTOK SLIDE PIPELINE ---
+TIKTOK_INPUT_IMAGES_DIR = "input/images"
+TIKTOK_OUTPUT_DIR = "output/slides"
+TIKTOK_FONT_PATH = "assets/fonts/Montserrat-Black.ttf"
+TIKTOK_FONT_BOLD_PATH = "assets/fonts/Montserrat-Bold.ttf"
+SLIDE_WIDTH = 1080
+SLIDE_HEIGHT = 1920
+TIKTOK_MODEL = "claude-opus-4-7"
+
+TIKTOK_CREATORS = {
+    "Fiona (US)": {
+        "age": 24,
+        "tone": "confident, direct, aspirational — a young American woman who figured out money early and wants to share what works",
+        "handle": "@fionatalksfinance",
+        "overlay_opacity": 160,       # 0-255
+        "accent_color": (212, 175, 55),  # gold
+    },
+    "Lisa (AU)": {
+        "age": 26,
+        "tone": "playful, casual, relatable — an Australian woman who's unexpectedly good with money and talks about it like a friend",
+        "handle": "@lisaonmoney",
+        "overlay_opacity": 150,
+        "accent_color": (255, 255, 255),
+    },
+}
+
 # --- HEYGEN AVATARS ---
 # Pre-registered in HeyGen dashboard. Add new avatar IDs here as Fiona's
 # image library grows. The pipeline cycles through them automatically.
