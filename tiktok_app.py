@@ -369,52 +369,59 @@ with T_ANALYZE:
 
     st.divider()
 
-    if an_url and st.button("🚀 Download & Analyze", type="primary",
-                             use_container_width=True, key="an_run"):
-        ss.an_record = None
-        ss.an_analysis = None
+    # Always render the button; validate URL after click
+    run_clicked = st.button("🚀 Download & Analyze", type="primary",
+                            use_container_width=True, key="an_run")
 
-        with st.status("⬇️  Downloading slideshow…", expanded=True) as s_dl:
-            try:
-                rec = dl_tiktok(an_url)
-                # rec is None or has _error key on failure
-                if not rec or rec.get("_error"):
-                    err = (rec or {}).get("_error", "Unknown error")
-                    s_dl.update(label="❌ Download failed", state="error")
-                    st.error(f"**yt-dlp error:** {err}")
-                    if not COOKIES_FILE.exists():
-                        st.info(
-                            "💡 Most TikTok videos require you to be logged in. "
-                            "Upload your **cookies.txt** in the expander above and try again."
-                        )
-                    st.stop()
-                ss.an_record = rec
+    if run_clicked:
+        if not an_url.strip():
+            st.warning("Paste a TikTok URL above first.")
+        else:
+            ss.an_record   = None
+            ss.an_analysis = None
+
+            # ── Step 1: Download ──────────────────────────────────────────────
+            dl_ok = False
+            with st.spinner("⬇️  Downloading slideshow via yt-dlp…"):
+                try:
+                    rec = dl_tiktok(an_url.strip())
+                except Exception as exc:
+                    rec = {"_error": str(exc)}
+
+            if not rec or rec.get("_error"):
+                err = (rec or {}).get("_error", "Unknown error")
+                st.error(f"**Download failed:** {err}")
+                browser_pref = get_browser_pref()
+                if not COOKIES_FILE.exists() and not browser_pref:
+                    st.info(
+                        "💡 TikTok requires a logged-in session for most videos. "
+                        "Open the 🍪 cookie auth expander above, pick **🦁 Brave**, and try again."
+                    )
+            else:
                 paths = [Path(p) for p in rec.get("image_paths", []) if Path(p).exists()]
-                s_dl.update(
-                    label=f"✅ {len(paths)} slide(s) downloaded from @{rec.get('author', '?')}",
-                    state="complete",
-                )
-            except Exception as e:
-                s_dl.update(label=f"❌ {e}", state="error")
-                st.stop()
+                st.success(f"✅ Downloaded {len(paths)} slide(s) from @{rec.get('author', '?')}")
+                ss.an_record = rec
+                dl_ok = True
 
-        with st.status("🤖  Analyzing with Claude Opus 4.7…", expanded=True) as s_an:
-            try:
+            # ── Step 2: Analyze ───────────────────────────────────────────────
+            if dl_ok:
+                with st.spinner("🤖  Analyzing with Claude Opus 4.7…"):
+                    try:
+                        analysis = analyze_post(ss.an_record["post_id"])
+                    except Exception as exc:
+                        analysis = None
+                        st.error(f"**Analysis failed:** {exc}")
+
+                if analysis:
+                    ss.an_analysis = analysis
+                    st.success(f"✅ Hook extracted — type: **{analysis.get('hook_type', '?')}**")
+                elif analysis is None and dl_ok:
+                    st.error("Claude analysis returned nothing. Check your ANTHROPIC_API_KEY.")
                 analysis = analyze_post(ss.an_record["post_id"])
                 if not analysis:
                     s_an.update(label="❌ Analysis failed", state="error")
                     st.stop()
                 ss.an_analysis = analysis
-                s_an.update(
-                    label=f"✅ Hook extracted — type: {analysis.get('hook_type', '?')}",
-                    state="complete",
-                )
-            except Exception as e:
-                s_an.update(label=f"❌ {e}", state="error")
-                st.stop()
-
-        st.rerun()
-
     # ── Results ───────────────────────────────────────────────────────────────
     if ss.an_record and ss.an_analysis:
         rec      = ss.an_record
