@@ -7,3 +7,4 @@ certifi
 elevenlabs
 Pillow
 yt-dlp
+gallery-dl

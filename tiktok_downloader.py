@@ -150,7 +150,92 @@ def set_browser_pref(browser: str | None) -> None:
         BROWSER_PREF.unlink()
 
 
-def _build_cmd(url: str, out_dir: Path) -> list[str]:
+def _is_photo_url(url: str) -> bool:
+    """Return True for TikTok slideshow/photo URLs (/photo/ pattern)."""
+    return "/photo/" in url
+
+
+# ── gallery-dl (for /photo/ slideshow URLs) ───────────────────────────────────
+
+def _build_gallery_dl_cmd(url: str, out_dir: Path) -> list[str]:
+    """
+    Build a gallery-dl command for TikTok photo/slideshow URLs.
+    gallery-dl natively supports TikTok image galleries unlike yt-dlp.
+    Auth priority: cookies file > browser extraction > no auth.
+    """
+    cmd = [
+        "gallery-dl",
+        "-D", str(out_dir),            # exact output directory (no subdirs)
+        "--no-mtime",                   # don't set file mtime from metadata
+    ]
+    if COOKIES_FILE.exists():
+        cmd += ["-C", str(COOKIES_FILE)]
+    elif (browser := get_browser_pref()):
+        cmd += ["--cookies-from-browser", browser]
+    return cmd + [url]
+
+
+def _gallery_dl_metadata(url: str) -> dict:
+    """
+    Fetch post metadata from gallery-dl --dump-json (stdout JSON lines).
+    Returns the first usable metadata dict, or {} on failure.
+    """
+    cmd = ["gallery-dl", "--dump-json", "--no-download"]
+    if COOKIES_FILE.exists():
+        cmd += ["-C", str(COOKIES_FILE)]
+    elif (browser := get_browser_pref()):
+        cmd += ["--cookies-from-browser", browser]
+    cmd.append(url)
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+                # gallery-dl emits [type, url, metadata] triples or just dicts
+                if isinstance(data, list) and len(data) == 3 and isinstance(data[2], dict):
+                    return data[2]
+                if isinstance(data, dict):
+                    return data
+            except json.JSONDecodeError:
+                continue
+    except Exception:
+        pass
+    return {}
+
+
+def _download_with_gallery_dl(url: str, out_dir: Path) -> dict:
+    """
+    Download a TikTok /photo/ slideshow via gallery-dl.
+    Returns {"images": [...], "info": {...}} or {"_error": msg}.
+    """
+    # Grab metadata first (lightweight, no download)
+    info = _gallery_dl_metadata(url)
+
+    cmd = _build_gallery_dl_cmd(url, out_dir)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        stderr = result.stderr.strip()
+        stdout = result.stdout.strip()
+
+        if result.returncode != 0 and not any(out_dir.glob("*")):
+            err_lines = [l for l in (stderr + "\n" + stdout).splitlines()
+                         if l.strip()]
+            err_msg = err_lines[0] if err_lines else "gallery-dl: unknown error"
+            return {"_error": err_msg[:300]}
+
+    except subprocess.TimeoutExpired:
+        return {"_error": "gallery-dl timed out after 120 s"}
+
+    return {"images": [], "info": info}   # images resolved by caller from disk
+
+
+# ── yt-dlp (for /video/ URLs) ─────────────────────────────────────────────────
+
+def _build_ytdlp_cmd(url: str, out_dir: Path) -> list[str]:
     """
     Build the yt-dlp command with the best available auth method:
       1. Cookies file (data/tiktok_cookies.txt) — works anywhere incl. remote
@@ -168,20 +253,21 @@ def _build_cmd(url: str, out_dir: Path) -> list[str]:
         "-o", str(out_dir / "%(id)s_%(playlist_index)s.%(ext)s"),
     ]
     if COOKIES_FILE.exists():
-        # Explicit file takes priority (works in remote container too)
         cmd += ["--cookies", str(COOKIES_FILE)]
     elif (browser := get_browser_pref()):
-        # Pull cookies straight from the local browser — no export needed
         cmd += ["--cookies-from-browser", browser]
     return cmd + [url]
 
 
+# ── Unified download ──────────────────────────────────────────────────────────
+
 def download(url: str, force: bool = False) -> dict | None:
     """
-    Download a TikTok slideshow URL. Returns a record dict or None on failure.
-    Idempotent — if already downloaded successfully, returns existing record.
-    Set force=True to re-download even if already in DB.
-    Returns a dict with an extra '_error' key on failure so callers can show the reason.
+    Download a TikTok URL (video or slideshow). Returns a record dict or None.
+    - /photo/ URLs → gallery-dl (supports TikTok image galleries natively)
+    - /video/ URLs → yt-dlp
+    Idempotent — skips if already successfully downloaded unless force=True.
+    Returns a dict with '_error' key on failure.
     """
     init_db()
     url = _clean_url(url)
@@ -197,44 +283,51 @@ def download(url: str, force: bool = False) -> dict | None:
     out_dir = OUT_ROOT / post_id
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    cmd = _build_cmd(url, out_dir)
     print(f"  ↓  Downloading {url}")
 
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        stderr = result.stderr.strip()
-        stdout = result.stdout.strip()
-
-        # Surface the real yt-dlp error for the UI
-        if result.returncode != 0 and not any(out_dir.glob("*")):
-            err_lines = [l for l in (stderr or stdout).splitlines()
-                         if "ERROR" in l or "error" in l.lower()]
-            err_msg = err_lines[0] if err_lines else (stderr or stdout or "unknown error")[:300]
-            print(f"  ✗  {err_msg}")
-            return {"_error": err_msg}
-
-    except subprocess.TimeoutExpired:
-        return {"_error": "yt-dlp timed out after 120 s"}
-
-    # Find info JSON
-    info_files = list(out_dir.glob("*.info.json"))
     info: dict = {}
-    if info_files:
-        try:
-            info = json.loads(info_files[0].read_text(encoding="utf-8"))
-        except Exception:
-            pass
 
-    # Collect images (exclude thumbnails named *_NA.* or *.info.json)
+    if _is_photo_url(url):
+        # ── gallery-dl path (TikTok slideshow) ──────────────────────────────
+        result = _download_with_gallery_dl(url, out_dir)
+        if "_error" in result:
+            print(f"  ✗  {result['_error']}")
+            return result
+        info = result.get("info", {})
+    else:
+        # ── yt-dlp path (TikTok video) ───────────────────────────────────────
+        cmd = _build_ytdlp_cmd(url, out_dir)
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            stderr = proc.stderr.strip()
+            stdout = proc.stdout.strip()
+
+            if proc.returncode != 0 and not any(out_dir.glob("*")):
+                err_lines = [l for l in (stderr or stdout).splitlines()
+                             if "ERROR" in l or "error" in l.lower()]
+                err_msg = err_lines[0] if err_lines else (stderr or stdout or "unknown error")[:300]
+                print(f"  ✗  {err_msg}")
+                return {"_error": err_msg}
+
+        except subprocess.TimeoutExpired:
+            return {"_error": "yt-dlp timed out after 120 s"}
+
+        # Parse yt-dlp info JSON
+        info_files = list(out_dir.glob("*.info.json"))
+        if info_files:
+            try:
+                info = json.loads(info_files[0].read_text(encoding="utf-8"))
+            except Exception:
+                pass
+
+    # ── Collect images from disk ─────────────────────────────────────────────
     images = sorted(
         f for f in out_dir.iterdir()
         if f.suffix.lower() in IMAGE_EXT
         and "_NA." not in f.name
         and not f.name.endswith(".info.json")
     )
-
     if not images:
-        # Fallback: yt-dlp may have written the slideshow differently
         images = sorted(f for f in out_dir.iterdir() if f.suffix.lower() in IMAGE_EXT)
 
     image_paths = [str(p.relative_to(Path.cwd())) for p in images]
@@ -244,8 +337,10 @@ def download(url: str, force: bool = False) -> dict | None:
         "post_id":    real_post_id,
         "url":        url,
         "caption":    (info.get("description") or info.get("title") or ""),
-        "author":     info.get("uploader") or info.get("creator") or "",
-        "like_count": info.get("like_count") or 0,
+        "author":     (info.get("uploader") or info.get("creator")
+                       or info.get("author", {}).get("name", "") if isinstance(info.get("author"), dict)
+                       else info.get("author", "")),
+        "like_count": info.get("like_count") or info.get("diggCount") or 0,
         "slide_count": len(image_paths),
         "image_paths": image_paths,
         "metadata":   info,
