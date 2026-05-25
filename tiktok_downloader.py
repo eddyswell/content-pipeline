@@ -106,6 +106,17 @@ def save_hooks(post_id: str, analysis: dict, niche: str = "personal finance"):
 
 # ── Download ──────────────────────────────────────────────────────────────────
 
+def _clean_url(url: str) -> str:
+    """
+    Strip tracking params and normalise TikTok URLs.
+    e.g. https://www.tiktok.com/@user/photo/123?_r=1&_t=abc  →  https://www.tiktok.com/@user/photo/123
+    """
+    from urllib.parse import urlparse, urlunparse
+    p = urlparse(url.strip())
+    # Keep only scheme + netloc + path — drop all query params & fragments
+    return urlunparse((p.scheme, p.netloc, p.path, "", "", ""))
+
+
 def _extract_post_id(url: str) -> str:
     """Best-effort post ID from URL or yt-dlp metadata."""
     parts = url.rstrip("/").split("/")
@@ -173,7 +184,7 @@ def download(url: str, force: bool = False) -> dict | None:
     Returns a dict with an extra '_error' key on failure so callers can show the reason.
     """
     init_db()
-    url = url.strip()
+    url = _clean_url(url)
     post_id = _extract_post_id(url)
 
     if not force:
