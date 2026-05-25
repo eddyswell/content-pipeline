@@ -280,8 +280,8 @@ with T_SETTINGS:
 with T_ANALYZE:
     st.header("🔍 Analyze TikTok URL")
     st.caption(
-        "Paste any TikTok slideshow link → yt-dlp downloads the slides → "
-        "Claude Opus 4.7 extracts the hook structure + Pinterest queries."
+        "Paste any TikTok slideshow link → downloads the slides (gallery-dl for photo posts, "
+        "yt-dlp for videos) → Claude Opus 4.7 extracts the hook structure + Pinterest queries."
     )
     st.divider()
 
@@ -311,7 +311,7 @@ with T_ANALYZE:
     with st.expander(expander_label, expanded=not cookie_active):
         st.caption(
             "TikTok blocks most downloads without a logged-in session. "
-            "**Running locally?** Just pick your browser below — yt-dlp reads cookies directly, "
+            "**Running locally?** Just pick your browser below — gallery-dl/yt-dlp reads cookies directly, "
             "no export needed. Running remotely (this container)? Upload a cookies.txt file instead."
         )
 
@@ -343,8 +343,8 @@ with T_ANALYZE:
         with b_col1:
             if chosen != "none":
                 st.caption(
-                    f"yt-dlp will run `--cookies-from-browser {chosen}`. "
-                    "Works when the app runs on **your machine** with {chosen.title()} installed."
+                    f"gallery-dl / yt-dlp will read cookies from **{chosen.title()}**. "
+                    "Works when the app runs on **your machine** with that browser installed."
                 )
 
         st.divider()
@@ -382,7 +382,7 @@ with T_ANALYZE:
 
             # ── Step 1: Download ──────────────────────────────────────────────
             dl_ok = False
-            with st.spinner("⬇️  Downloading slideshow via yt-dlp…"):
+            with st.spinner("⬇️  Downloading slideshow…"):
                 try:
                     rec = dl_tiktok(an_url.strip())
                 except Exception as exc:
