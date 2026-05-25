@@ -1,5 +1,8 @@
 """
-tiktok_downloader.py — Download a TikTok slideshow via yt-dlp and store in SQLite.
+tiktok_downloader.py — Download TikTok slideshows and store in SQLite.
+
+/photo/ URLs: scraped directly from page HTML (no external tools, no auth needed)
+/video/ URLs: yt-dlp
 
 Usage:
     python tiktok_downloader.py https://www.tiktok.com/@user/photo/1234567890
@@ -9,17 +12,25 @@ Usage:
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
 
+import requests
+
 import config
 
 DB_PATH   = Path(config.TIKTOK_DB_PATH)
 OUT_ROOT  = Path(config.TIKTOK_VIRAL_SLIDES_DIR)
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp"}
+
+_MOBILE_UA = (
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+)
 
 
 # ── Database ──────────────────────────────────────────────────────────────────
@@ -104,9 +115,10 @@ def save_hooks(post_id: str, analysis: dict, niche: str = "personal finance"):
         ))
 
 
-# ── Download ──────────────────────────────────────────────────────────────────
+# ── URL helpers ───────────────────────────────────────────────────────────────
 
 _SHORT_TIKTOK_DOMAINS = {"vm.tiktok.com", "vt.tiktok.com", "m.tiktok.com"}
+
 
 def _resolve_url(url: str) -> str:
     """
@@ -119,31 +131,21 @@ def _resolve_url(url: str) -> str:
     if urlparse(url.strip()).netloc not in _SHORT_TIKTOK_DOMAINS:
         return url
     try:
-        req = urllib.request.Request(
-            url.strip(),
-            headers={"User-Agent":
-                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-                "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"},
-        )
+        req = urllib.request.Request(url.strip(), headers={"User-Agent": _MOBILE_UA})
         with urllib.request.urlopen(req, timeout=10) as resp:
-            return resp.url          # urllib follows 301/302 automatically
+            return resp.url
     except Exception:
         return url
 
 
 def _clean_url(url: str) -> str:
-    """
-    Strip tracking params and normalise TikTok URLs.
-    e.g. https://www.tiktok.com/@user/photo/123?_r=1&_t=abc  →  https://www.tiktok.com/@user/photo/123
-    """
+    """Strip tracking params: https://tiktok.com/@u/photo/123?_r=1  →  …/photo/123"""
     from urllib.parse import urlparse, urlunparse
     p = urlparse(url.strip())
-    # Keep only scheme + netloc + path — drop all query params & fragments
     return urlunparse((p.scheme, p.netloc, p.path, "", "", ""))
 
 
 def _extract_post_id(url: str) -> str:
-    """Best-effort post ID from URL or yt-dlp metadata."""
     parts = url.rstrip("/").split("/")
     for p in reversed(parts):
         p = p.split("?")[0]
@@ -152,15 +154,14 @@ def _extract_post_id(url: str) -> str:
     return parts[-1].split("?")[0]
 
 
-COOKIES_FILE   = Path("data/tiktok_cookies.txt")   # manual export fallback
-BROWSER_PREF   = Path("data/browser_pref.txt")     # stores chosen browser name
+# ── Cookie / browser auth ─────────────────────────────────────────────────────
 
-# Browsers yt-dlp can read from directly
+COOKIES_FILE   = Path("data/tiktok_cookies.txt")
+BROWSER_PREF   = Path("data/browser_pref.txt")
 SUPPORTED_BROWSERS = ["brave", "chrome", "firefox", "safari", "edge", "chromium", "opera"]
 
 
 def get_browser_pref() -> str | None:
-    """Return the saved browser preference, or None if not set."""
     if BROWSER_PREF.exists():
         v = BROWSER_PREF.read_text().strip().lower()
         return v if v in SUPPORTED_BROWSERS else None
@@ -175,108 +176,109 @@ def set_browser_pref(browser: str | None) -> None:
         BROWSER_PREF.unlink()
 
 
-def _is_photo_url(url: str) -> bool:
-    """Return True for TikTok slideshow/photo URLs (/photo/ pattern)."""
-    return "/photo/" in url
-
-
-# ── gallery-dl (for /photo/ slideshow URLs) ───────────────────────────────────
-
-def _build_gallery_dl_cmd(url: str, out_dir: Path) -> list[str]:
-    """
-    Build a gallery-dl command for TikTok photo/slideshow URLs.
-    gallery-dl natively supports TikTok image galleries unlike yt-dlp.
-    Auth priority: cookies file > browser extraction > no auth.
-    """
-    cmd = [
-        "gallery-dl",
-        "-D", str(out_dir),            # exact output directory (no subdirs)
-        "--no-mtime",                   # don't set file mtime from metadata
-        "-o", "filename={id}_{num:>02}.{extension}",  # clean short filenames
-        "-o", "ytdl.enabled=false",    # prevent falling back to yt-dlp internally
-    ]
+def _requests_session() -> requests.Session:
+    """Build a requests session, loading cookies from file if available."""
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": _MOBILE_UA,
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.tiktok.com/",
+    })
     if COOKIES_FILE.exists():
-        cmd += ["-C", str(COOKIES_FILE)]
-    elif (browser := get_browser_pref()):
-        cmd += ["--cookies-from-browser", browser]
-    return cmd + [url]
+        import http.cookiejar
+        jar = http.cookiejar.MozillaCookieJar()
+        try:
+            jar.load(str(COOKIES_FILE), ignore_discard=True, ignore_expires=True)
+            session.cookies = jar  # type: ignore[assignment]
+        except Exception:
+            pass
+    return session
 
 
-def _gallery_dl_metadata(url: str) -> dict:
+# ── /photo/ downloader (pure requests, no external tools) ────────────────────
+
+def _scrape_photo_slides(url: str, out_dir: Path) -> dict:
     """
-    Fetch post metadata from gallery-dl --dump-json (stdout JSON lines).
-    Returns the first usable metadata dict, or {} on failure.
+    Download a TikTok slideshow by parsing the page HTML directly.
+    No gallery-dl, no yt-dlp. Works for public posts without login.
+
+    Returns {"info": {...}, "saved": [Path, ...]} or {"_error": msg}.
     """
-    cmd = ["gallery-dl", "--dump-json", "--no-download"]
-    if COOKIES_FILE.exists():
-        cmd += ["-C", str(COOKIES_FILE)]
-    elif (browser := get_browser_pref()):
-        cmd += ["--cookies-from-browser", browser]
-    cmd.append(url)
+    session = _requests_session()
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        for line in result.stdout.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                data = json.loads(line)
-                # gallery-dl emits [type, url, metadata] triples or just dicts
-                if isinstance(data, list) and len(data) == 3 and isinstance(data[2], dict):
-                    return data[2]
-                if isinstance(data, dict):
-                    return data
-            except json.JSONDecodeError:
-                continue
-    except Exception:
-        pass
-    return {}
+        resp = session.get(url, timeout=30, allow_redirects=True)
+        resp.raise_for_status()
+    except Exception as exc:
+        return {"_error": f"Could not fetch TikTok page: {exc}"}
 
+    # TikTok embeds all post data in a <script id="__UNIVERSAL_DATA_FOR_REHYDRATION__"> tag
+    match = re.search(
+        r'id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>(.*?)</script>',
+        resp.text, re.DOTALL,
+    )
+    if not match:
+        return {"_error": "TikTok page structure not recognised — page may have changed"}
 
-def _download_with_gallery_dl(url: str, out_dir: Path) -> dict:
-    """
-    Download a TikTok /photo/ slideshow via gallery-dl.
-    Returns {"images": [...], "info": {...}} or {"_error": msg}.
-    """
-    # Grab metadata first (lightweight, no download)
-    info = _gallery_dl_metadata(url)
-
-    cmd = _build_gallery_dl_cmd(url, out_dir)
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        stderr = result.stderr.strip()
-        stdout = result.stdout.strip()
+        data  = json.loads(match.group(1))
+        scope = data["__DEFAULT_SCOPE__"]
+        # Try both known key names (TikTok has changed this before)
+        detail = (
+            scope.get("webapp.reflow.video.detail")
+            or scope.get("webapp.video-detail")
+            or {}
+        )
+        item = detail.get("itemInfo", {}).get("itemStruct", {})
+    except Exception as exc:
+        return {"_error": f"Failed to parse TikTok data: {exc}"}
 
-        if result.returncode != 0 and not any(out_dir.glob("*")):
-            err_lines = [l for l in (stderr + "\n" + stdout).splitlines()
-                         if l.strip()]
-            err_msg = err_lines[0] if err_lines else "gallery-dl: unknown error"
-            return {"_error": err_msg[:300]}
+    if not item:
+        return {"_error": "Post data missing — it may be private or geo-blocked"}
 
-    except subprocess.TimeoutExpired:
-        return {"_error": "gallery-dl timed out after 120 s"}
+    images_data = item.get("imagePost", {}).get("images", [])
+    if not images_data:
+        return {"_error": "No slideshow images found — this looks like a video, not a photo post"}
 
-    return {"images": [], "info": info}   # images resolved by caller from disk
+    post_id = item.get("id", _extract_post_id(url))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    saved: list[Path] = []
+
+    for i, img_data in enumerate(images_data, 1):
+        url_list = img_data.get("imageURL", {}).get("urlList", [])
+        if not url_list:
+            continue
+        img_url = url_list[0]
+        try:
+            ir = session.get(img_url, timeout=30)
+            ir.raise_for_status()
+            ct  = ir.headers.get("content-type", "image/jpeg")
+            ext = "jpg" if "jpeg" in ct else ct.split("/")[-1].split(";")[0].strip() or "jpg"
+            fpath = out_dir / f"{post_id}_{i:02d}.{ext}"
+            fpath.write_bytes(ir.content)
+            saved.append(fpath)
+        except Exception as exc:
+            print(f"  ⚠  Slide {i} failed: {exc}")
+
+    info = {
+        "id":          post_id,
+        "description": item.get("desc", ""),
+        "title":       item.get("desc", ""),
+        "uploader":    item.get("author", {}).get("uniqueId", ""),
+        "like_count":  item.get("stats", {}).get("diggCount", 0),
+    }
+    return {"info": info, "saved": saved}
 
 
-# ── yt-dlp (for /video/ URLs) ─────────────────────────────────────────────────
+# ── /video/ downloader (yt-dlp) ───────────────────────────────────────────────
 
 def _build_ytdlp_cmd(url: str, out_dir: Path) -> list[str]:
-    """
-    Build the yt-dlp command with the best available auth method:
-      1. Cookies file (data/tiktok_cookies.txt) — works anywhere incl. remote
-      2. Browser extraction (--cookies-from-browser brave/chrome/…) — local only
-      3. No auth — public posts only
-    """
     cmd = [
         "yt-dlp",
         "--write-info-json",
         "--no-warnings",
         "--ignore-errors",
-        "--user-agent",
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-        "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+        "--user-agent", _MOBILE_UA,
         "-o", str(out_dir / "%(id)s_%(playlist_index)s.%(ext)s"),
     ]
     if COOKIES_FILE.exists():
@@ -288,16 +290,16 @@ def _build_ytdlp_cmd(url: str, out_dir: Path) -> list[str]:
 
 # ── Unified download ──────────────────────────────────────────────────────────
 
-def download(url: str, force: bool = False) -> dict | None:
+def download(url: str, force: bool = False) -> dict:
     """
-    Download a TikTok URL (video or slideshow). Returns a record dict or None.
-    - /photo/ URLs → gallery-dl (supports TikTok image galleries natively)
+    Download a TikTok URL and store in SQLite.
+    - /photo/ URLs → pure Python HTML scraper (no external tools)
     - /video/ URLs → yt-dlp
-    Idempotent — skips if already successfully downloaded unless force=True.
-    Returns a dict with '_error' key on failure.
+    Idempotent: skips if already downloaded successfully (unless force=True).
+    Always returns a dict; failure has a '_error' key.
     """
     init_db()
-    url = _resolve_url(url)   # expand vm.tiktok.com / vt.tiktok.com short links
+    url = _resolve_url(url)   # expand vm.tiktok.com short links
     url = _clean_url(url)     # strip tracking params
     post_id = _extract_post_id(url)
 
@@ -310,37 +312,38 @@ def download(url: str, force: bool = False) -> dict | None:
 
     out_dir = OUT_ROOT / post_id
     out_dir.mkdir(parents=True, exist_ok=True)
-
     print(f"  ↓  Downloading {url}")
 
     info: dict = {}
+    image_paths: list[str] = []
 
-    if _is_photo_url(url):
-        # ── gallery-dl path (TikTok slideshow) ──────────────────────────────
-        result = _download_with_gallery_dl(url, out_dir)
+    if "/photo/" in url:
+        # ── Pure Python scraper (TikTok slideshow) ───────────────────────────
+        result = _scrape_photo_slides(url, out_dir)
         if "_error" in result:
             print(f"  ✗  {result['_error']}")
             return result
         info = result.get("info", {})
+        saved = result.get("saved", [])
+        _cwd = Path.cwd().resolve()
+        image_paths = [str(p.resolve().relative_to(_cwd)) for p in saved]
+
     else:
-        # ── yt-dlp path (TikTok video) ───────────────────────────────────────
+        # ── yt-dlp (TikTok video) ────────────────────────────────────────────
         cmd = _build_ytdlp_cmd(url, out_dir)
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
             stderr = proc.stderr.strip()
             stdout = proc.stdout.strip()
-
             if proc.returncode != 0 and not any(out_dir.glob("*")):
                 err_lines = [l for l in (stderr or stdout).splitlines()
                              if "ERROR" in l or "error" in l.lower()]
                 err_msg = err_lines[0] if err_lines else (stderr or stdout or "unknown error")[:300]
                 print(f"  ✗  {err_msg}")
                 return {"_error": err_msg}
-
         except subprocess.TimeoutExpired:
             return {"_error": "yt-dlp timed out after 120 s"}
 
-        # Parse yt-dlp info JSON
         info_files = list(out_dir.glob("*.info.json"))
         if info_files:
             try:
@@ -348,38 +351,25 @@ def download(url: str, force: bool = False) -> dict | None:
             except Exception:
                 pass
 
-    # ── Collect images from disk ─────────────────────────────────────────────
-    images = sorted(
-        f for f in out_dir.iterdir()
-        if f.suffix.lower() in IMAGE_EXT
-        and "_NA." not in f.name
-        and not f.name.endswith(".info.json")
-    )
-    if not images:
-        images = sorted(f for f in out_dir.iterdir() if f.suffix.lower() in IMAGE_EXT)
-
-    # p may be relative (if out_dir is relative) or absolute — normalise to
-    # a relative-to-cwd string so stored paths work from the project root.
-    _cwd = Path.cwd()
-    image_paths = [
-        str(p.resolve().relative_to(_cwd.resolve())) for p in images
-    ]
+        images = sorted(
+            f for f in out_dir.iterdir()
+            if f.suffix.lower() in IMAGE_EXT and "_NA." not in f.name
+        )
+        _cwd = Path.cwd().resolve()
+        image_paths = [str(p.resolve().relative_to(_cwd)) for p in images]
 
     real_post_id = info.get("id", post_id)
     record = {
-        "post_id":    real_post_id,
-        "url":        url,
-        "caption":    (info.get("description") or info.get("title") or ""),
-        "author":     (info.get("uploader") or info.get("creator")
-                       or info.get("author", {}).get("name", "") if isinstance(info.get("author"), dict)
-                       else info.get("author", "")),
-        "like_count": info.get("like_count") or info.get("diggCount") or 0,
+        "post_id":     real_post_id,
+        "url":         url,
+        "caption":     info.get("description") or info.get("title") or "",
+        "author":      info.get("uploader") or info.get("creator") or "",
+        "like_count":  info.get("like_count") or info.get("diggCount") or 0,
         "slide_count": len(image_paths),
         "image_paths": image_paths,
-        "metadata":   info,
-        "status":     "success" if image_paths else "no_images",
+        "metadata":    info,
+        "status":      "success" if image_paths else "no_images",
     }
-
     save_post(record)
 
     if image_paths:

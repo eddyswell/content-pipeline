@@ -6,5 +6,6 @@ aiofiles
 certifi
 elevenlabs
 Pillow
+requests
 yt-dlp
 gallery-dl
