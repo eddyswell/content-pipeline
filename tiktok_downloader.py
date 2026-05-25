@@ -167,6 +167,7 @@ def _build_gallery_dl_cmd(url: str, out_dir: Path) -> list[str]:
         "gallery-dl",
         "-D", str(out_dir),            # exact output directory (no subdirs)
         "--no-mtime",                   # don't set file mtime from metadata
+        "-o", "filename={id}_{num:>02}.{extension}",  # clean short filenames
     ]
     if COOKIES_FILE.exists():
         cmd += ["-C", str(COOKIES_FILE)]
@@ -330,7 +331,12 @@ def download(url: str, force: bool = False) -> dict | None:
     if not images:
         images = sorted(f for f in out_dir.iterdir() if f.suffix.lower() in IMAGE_EXT)
 
-    image_paths = [str(p.relative_to(Path.cwd())) for p in images]
+    # p may be relative (if out_dir is relative) or absolute — normalise to
+    # a relative-to-cwd string so stored paths work from the project root.
+    _cwd = Path.cwd()
+    image_paths = [
+        str(p.resolve().relative_to(_cwd.resolve())) for p in images
+    ]
 
     real_post_id = info.get("id", post_id)
     record = {
