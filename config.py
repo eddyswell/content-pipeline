@@ -43,6 +43,11 @@ ELEVENLABS_VOICE_ID = CREATORS["Fiona (US)"]["voice_id"]
 VOICE_SETTINGS = CREATORS["Fiona (US)"]["voice_settings"]
 
 # --- TIKTOK SLIDE PIPELINE ---
+TIKTOK_DB_PATH = "data/tiktok_slides.db"
+TIKTOK_VIRAL_SLIDES_DIR = "input/viral_slides"   # downloaded TikTok slides
+TIKTOK_HOOKS_FILE = "input/tiktok_hooks.txt"      # hook library (append-only)
+
+
 TIKTOK_INPUT_IMAGES_DIR = "input/images"
 TIKTOK_OUTPUT_DIR = "output/slides"
 TIKTOK_FONT_PATH = "assets/fonts/Montserrat-Black.ttf"

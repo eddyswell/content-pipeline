@@ -11,6 +11,10 @@ assets/*.mp4
 assets/music/
 assets/images/
 
+# TikTok pipeline data (large/generated files)
+data/
+input/viral_slides/
+
 # Python
 __pycache__/
 *.pyc

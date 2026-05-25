@@ -20,6 +20,8 @@ from pathlib import Path
 import config
 from tiktok_content_generator import generate_slide_content
 from generate_slides import generate_slideshow
+from tiktok_downloader import download
+from tiktok_analyzer import analyze, print_analysis
 
 
 SAMPLE_HOOKS = [
@@ -201,10 +203,39 @@ def main():
                         help="Run face-swap on input/inspiration/ before generating slides")
     parser.add_argument("--photos-only",      action="store_true",
                         help="Only run face-swap, skip slide generation")
+    parser.add_argument("--analyze-url",      help="Download + analyze a TikTok URL, then optionally generate slides")
     args = parser.parse_args()
 
     print("=== TikTok Slideshow Pipeline ===")
 
+    # ── URL analysis mode ─────────────────────────────────────────────────────
+    if args.analyze_url:
+        print(f"\nStep 1/2  Downloading slideshow...")
+        rec = download(args.analyze_url)
+        if not rec:
+            print("Download failed. Check the URL and try again.")
+            return
+
+        print(f"\nStep 2/2  Analyzing with Claude Opus 4.7...")
+        analysis = analyze(rec["post_id"])
+        if not analysis:
+            return
+        print_analysis(analysis)
+
+        # Offer to immediately generate slides from one of the extracted hooks
+        variations = analysis.get("variations", [])
+        if variations:
+            print("\nWant to generate slides from one of these hooks now?")
+            for i, v in enumerate(variations, 1):
+                print(f"  {i}. {v}")
+            print(f"  {len(variations)+1}. Skip")
+            choice = input("\nEnter number: ").strip()
+            if choice.isdigit() and 1 <= int(choice) <= len(variations):
+                creator_key = args.creator if args.creator in config.TIKTOK_CREATORS else pick_creator()
+                run_single(creator_key, variations[int(choice) - 1])
+        return
+
+    # ── Normal slide generation mode ──────────────────────────────────────────
     creator_key = args.creator if args.creator in config.TIKTOK_CREATORS else pick_creator()
 
     # Optional: generate Fiona photos first
