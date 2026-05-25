@@ -106,6 +106,31 @@ def save_hooks(post_id: str, analysis: dict, niche: str = "personal finance"):
 
 # ── Download ──────────────────────────────────────────────────────────────────
 
+_SHORT_TIKTOK_DOMAINS = {"vm.tiktok.com", "vt.tiktok.com", "m.tiktok.com"}
+
+def _resolve_url(url: str) -> str:
+    """
+    Follow redirects for short TikTok URLs so routing logic can inspect the real path.
+    vm.tiktok.com/XYZ  →  https://www.tiktok.com/@user/photo/123?…
+    Falls back silently to the original URL on any network error.
+    """
+    import urllib.request
+    from urllib.parse import urlparse
+    if urlparse(url.strip()).netloc not in _SHORT_TIKTOK_DOMAINS:
+        return url
+    try:
+        req = urllib.request.Request(
+            url.strip(),
+            headers={"User-Agent":
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+                "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.url          # urllib follows 301/302 automatically
+    except Exception:
+        return url
+
+
 def _clean_url(url: str) -> str:
     """
     Strip tracking params and normalise TikTok URLs.
@@ -271,7 +296,8 @@ def download(url: str, force: bool = False) -> dict | None:
     Returns a dict with '_error' key on failure.
     """
     init_db()
-    url = _clean_url(url)
+    url = _resolve_url(url)   # expand vm.tiktok.com / vt.tiktok.com short links
+    url = _clean_url(url)     # strip tracking params
     post_id = _extract_post_id(url)
 
     if not force:
