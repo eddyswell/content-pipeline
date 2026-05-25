@@ -295,30 +295,75 @@ with T_ANALYZE:
     )
 
     # ── Cookie auth ───────────────────────────────────────────────────────────
-    from tiktok_downloader import COOKIES_FILE
-    with st.expander(
-        "🍪  Cookie auth " + ("✅  active" if COOKIES_FILE.exists() else "⚠️  not set — public posts only"),
-        expanded=not COOKIES_FILE.exists(),
-    ):
+    from tiktok_downloader import (
+        COOKIES_FILE, SUPPORTED_BROWSERS,
+        get_browser_pref, set_browser_pref,
+    )
+    browser_pref  = get_browser_pref()
+    cookie_active = COOKIES_FILE.exists() or bool(browser_pref)
+    expander_label = (
+        "🍪  Cookie auth — ✅  active (" +
+        (f"browser: {browser_pref}" if browser_pref else "cookies.txt") + ")"
+        if cookie_active else
+        "🍪  Cookie auth — ⚠️  not set (public posts only)"
+    )
+
+    with st.expander(expander_label, expanded=not cookie_active):
         st.caption(
             "TikTok blocks most downloads without a logged-in session. "
-            "Export your cookies with the **[Get cookies.txt LOCALLY]"
+            "**Running locally?** Just pick your browser below — yt-dlp reads cookies directly, "
+            "no export needed. Running remotely (this container)? Upload a cookies.txt file instead."
+        )
+
+        st.markdown("**Option A — Pick your browser (local only)**")
+        browser_options = ["none"] + SUPPORTED_BROWSERS
+        current_idx = (browser_options.index(browser_pref)
+                       if browser_pref in browser_options else 0)
+        chosen = st.selectbox(
+            "Browser to read cookies from",
+            browser_options,
+            index=current_idx,
+            key="an_browser_sel",
+            format_func=lambda x: {
+                "none": "— don't use browser cookies —",
+                "brave": "🦁  Brave",
+                "chrome": "🟡  Chrome",
+                "firefox": "🦊  Firefox",
+                "safari": "🧭  Safari",
+                "edge": "🔷  Edge",
+                "chromium": "⚙️  Chromium",
+                "opera": "🔴  Opera",
+            }.get(x, x),
+        )
+        b_col1, b_col2 = st.columns([3, 1])
+        with b_col2:
+            if st.button("💾 Save", key="an_save_browser", use_container_width=True):
+                set_browser_pref(None if chosen == "none" else chosen)
+                st.rerun()
+        with b_col1:
+            if chosen != "none":
+                st.caption(
+                    f"yt-dlp will run `--cookies-from-browser {chosen}`. "
+                    "Works when the app runs on **your machine** with {chosen.title()} installed."
+                )
+
+        st.divider()
+        st.markdown("**Option B — Upload cookies.txt (works remotely too)**")
+        st.caption(
+            "Install **[Get cookies.txt LOCALLY]"
             "(https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc)** "
-            "Chrome extension → save as `cookies.txt` → upload below."
+            "→ open TikTok while logged in → export → upload here."
         )
-        cookie_file = st.file_uploader(
-            "Upload cookies.txt", type=["txt"], key="an_cookies",
-        )
+        cookie_file = st.file_uploader("Upload cookies.txt", type=["txt"], key="an_cookies")
         if cookie_file:
             COOKIES_FILE.parent.mkdir(parents=True, exist_ok=True)
             COOKIES_FILE.write_bytes(cookie_file.getvalue())
-            st.success(f"✅ Cookies saved — all future downloads will use them.")
+            st.success("✅ Cookies saved — will be used for all downloads.")
             st.rerun()
         if COOKIES_FILE.exists():
-            col1, col2 = st.columns([3, 1])
-            col1.caption(f"Active cookie file: `{COOKIES_FILE}` "
-                         f"({COOKIES_FILE.stat().st_size // 1024} KB)")
-            if col2.button("🗑️ Remove", key="an_del_cookies"):
+            c1, c2 = st.columns([4, 1])
+            c1.caption(f"`{COOKIES_FILE}`  ({COOKIES_FILE.stat().st_size // 1024} KB)")
+            if c2.button("🗑️ Remove", key="an_del_cookies"):
                 COOKIES_FILE.unlink()
                 st.rerun()
 

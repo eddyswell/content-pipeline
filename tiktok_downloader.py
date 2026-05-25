@@ -116,27 +116,53 @@ def _extract_post_id(url: str) -> str:
     return parts[-1].split("?")[0]
 
 
-COOKIES_FILE = Path("data/tiktok_cookies.txt")   # user drops their cookies.txt here
+COOKIES_FILE   = Path("data/tiktok_cookies.txt")   # manual export fallback
+BROWSER_PREF   = Path("data/browser_pref.txt")     # stores chosen browser name
+
+# Browsers yt-dlp can read from directly
+SUPPORTED_BROWSERS = ["brave", "chrome", "firefox", "safari", "edge", "chromium", "opera"]
+
+
+def get_browser_pref() -> str | None:
+    """Return the saved browser preference, or None if not set."""
+    if BROWSER_PREF.exists():
+        v = BROWSER_PREF.read_text().strip().lower()
+        return v if v in SUPPORTED_BROWSERS else None
+    return None
+
+
+def set_browser_pref(browser: str | None) -> None:
+    BROWSER_PREF.parent.mkdir(parents=True, exist_ok=True)
+    if browser:
+        BROWSER_PREF.write_text(browser.lower())
+    elif BROWSER_PREF.exists():
+        BROWSER_PREF.unlink()
 
 
 def _build_cmd(url: str, out_dir: Path) -> list[str]:
-    """Build the yt-dlp command, adding cookies if available."""
+    """
+    Build the yt-dlp command with the best available auth method:
+      1. Cookies file (data/tiktok_cookies.txt) — works anywhere incl. remote
+      2. Browser extraction (--cookies-from-browser brave/chrome/…) — local only
+      3. No auth — public posts only
+    """
     cmd = [
         "yt-dlp",
         "--write-info-json",
         "--no-warnings",
         "--ignore-errors",
-        # realistic browser UA — helps avoid blocks on public posts
         "--user-agent",
         "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
         "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
         "-o", str(out_dir / "%(id)s_%(playlist_index)s.%(ext)s"),
     ]
-    # Prefer cookies file over browser extraction (works headlessly)
     if COOKIES_FILE.exists():
+        # Explicit file takes priority (works in remote container too)
         cmd += ["--cookies", str(COOKIES_FILE)]
-    cmd.append(url)
-    return cmd
+    elif (browser := get_browser_pref()):
+        # Pull cookies straight from the local browser — no export needed
+        cmd += ["--cookies-from-browser", browser]
+    return cmd + [url]
 
 
 def download(url: str, force: bool = False) -> dict | None:
