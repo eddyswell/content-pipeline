@@ -193,6 +193,7 @@ def _build_gallery_dl_cmd(url: str, out_dir: Path) -> list[str]:
         "-D", str(out_dir),            # exact output directory (no subdirs)
         "--no-mtime",                   # don't set file mtime from metadata
         "-o", "filename={id}_{num:>02}.{extension}",  # clean short filenames
+        "-o", "ytdl.enabled=false",    # prevent falling back to yt-dlp internally
     ]
     if COOKIES_FILE.exists():
         cmd += ["-C", str(COOKIES_FILE)]

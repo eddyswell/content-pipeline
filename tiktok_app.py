@@ -394,8 +394,10 @@ with T_ANALYZE:
                 browser_pref = get_browser_pref()
                 if not COOKIES_FILE.exists() and not browser_pref:
                     st.info(
-                        "💡 TikTok requires a logged-in session for most videos. "
-                        "Open the 🍪 cookie auth expander above, pick **🦁 Brave**, and try again."
+                        "💡 **No browser cookies set.** "
+                        "Open the 🍪 **Cookie auth** expander above → pick **🦁 Brave** → "
+                        "click **Save** → then try again.  \n"
+                        "gallery-dl needs your TikTok session to download slideshow posts."
                     )
             else:
                 paths = [Path(p) for p in rec.get("image_paths", []) if Path(p).exists()]
