@@ -212,6 +212,10 @@ def _scrape_photo_slides(url: str, out_dir: Path) -> dict:
     except Exception as exc:
         return {"_error": f"Could not fetch TikTok page: {exc}"}
 
+    # Log the final URL (useful when a short link redirected)
+    if resp.url != url:
+        print(f"  ↪  Resolved to {resp.url.split('?')[0]}")
+
     # TikTok embeds all post data in a <script id="__UNIVERSAL_DATA_FOR_REHYDRATION__"> tag
     match = re.search(
         r'id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>(.*?)</script>',
@@ -293,13 +297,13 @@ def _build_ytdlp_cmd(url: str, out_dir: Path) -> list[str]:
 def download(url: str, force: bool = False) -> dict:
     """
     Download a TikTok URL and store in SQLite.
-    - /photo/ URLs → pure Python HTML scraper (no external tools)
+    - /photo/ URLs or short links → pure Python HTML scraper (requests follows redirects)
     - /video/ URLs → yt-dlp
     Idempotent: skips if already downloaded successfully (unless force=True).
     Always returns a dict; failure has a '_error' key.
     """
     init_db()
-    url = _resolve_url(url)   # expand vm.tiktok.com short links
+    url = _resolve_url(url)   # best-effort expand of vm.tiktok.com short links
     url = _clean_url(url)     # strip tracking params
     post_id = _extract_post_id(url)
 
@@ -317,7 +321,10 @@ def download(url: str, force: bool = False) -> dict:
     info: dict = {}
     image_paths: list[str] = []
 
-    if "/photo/" in url:
+    # Route: explicit /photo/ URL OR short link (requests follows the redirect itself)
+    from urllib.parse import urlparse as _up
+    _is_short = _up(url).netloc in _SHORT_TIKTOK_DOMAINS
+    if "/photo/" in url or _is_short:
         # ── Pure Python scraper (TikTok slideshow) ───────────────────────────
         result = _scrape_photo_slides(url, out_dir)
         if "_error" in result:
