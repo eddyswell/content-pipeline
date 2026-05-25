@@ -294,6 +294,36 @@ with T_ANALYZE:
         key="an_url_input",
     )
 
+    # ── Cookie auth ───────────────────────────────────────────────────────────
+    from tiktok_downloader import COOKIES_FILE
+    with st.expander(
+        "🍪  Cookie auth " + ("✅  active" if COOKIES_FILE.exists() else "⚠️  not set — public posts only"),
+        expanded=not COOKIES_FILE.exists(),
+    ):
+        st.caption(
+            "TikTok blocks most downloads without a logged-in session. "
+            "Export your cookies with the **[Get cookies.txt LOCALLY]"
+            "(https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc)** "
+            "Chrome extension → save as `cookies.txt` → upload below."
+        )
+        cookie_file = st.file_uploader(
+            "Upload cookies.txt", type=["txt"], key="an_cookies",
+        )
+        if cookie_file:
+            COOKIES_FILE.parent.mkdir(parents=True, exist_ok=True)
+            COOKIES_FILE.write_bytes(cookie_file.getvalue())
+            st.success(f"✅ Cookies saved — all future downloads will use them.")
+            st.rerun()
+        if COOKIES_FILE.exists():
+            col1, col2 = st.columns([3, 1])
+            col1.caption(f"Active cookie file: `{COOKIES_FILE}` "
+                         f"({COOKIES_FILE.stat().st_size // 1024} KB)")
+            if col2.button("🗑️ Remove", key="an_del_cookies"):
+                COOKIES_FILE.unlink()
+                st.rerun()
+
+    st.divider()
+
     if an_url and st.button("🚀 Download & Analyze", type="primary",
                              use_container_width=True, key="an_run"):
         ss.an_record = None
@@ -302,9 +332,16 @@ with T_ANALYZE:
         with st.status("⬇️  Downloading slideshow…", expanded=True) as s_dl:
             try:
                 rec = dl_tiktok(an_url)
-                if not rec:
+                # rec is None or has _error key on failure
+                if not rec or rec.get("_error"):
+                    err = (rec or {}).get("_error", "Unknown error")
                     s_dl.update(label="❌ Download failed", state="error")
-                    st.error("Could not download. Check the URL — TikTok login-required posts won't work.")
+                    st.error(f"**yt-dlp error:** {err}")
+                    if not COOKIES_FILE.exists():
+                        st.info(
+                            "💡 Most TikTok videos require you to be logged in. "
+                            "Upload your **cookies.txt** in the expander above and try again."
+                        )
                     st.stop()
                 ss.an_record = rec
                 paths = [Path(p) for p in rec.get("image_paths", []) if Path(p).exists()]

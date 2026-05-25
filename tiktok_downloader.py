@@ -116,46 +116,68 @@ def _extract_post_id(url: str) -> str:
     return parts[-1].split("?")[0]
 
 
-def download(url: str) -> dict | None:
-    """
-    Download a TikTok slideshow URL. Returns a record dict or None on failure.
-    Idempotent — if already downloaded successfully, returns existing record.
-    """
-    init_db()
-    url = url.strip()
-    post_id = _extract_post_id(url)
+COOKIES_FILE = Path("data/tiktok_cookies.txt")   # user drops their cookies.txt here
 
-    existing = get_post(post_id)
-    if existing and existing["status"] == "success":
-        print(f"  ↩  Already downloaded ({post_id}), skipping.")
-        existing["image_paths"] = json.loads(existing["image_paths"])
-        return existing
 
-    out_dir = OUT_ROOT / post_id
-    out_dir.mkdir(parents=True, exist_ok=True)
-
+def _build_cmd(url: str, out_dir: Path) -> list[str]:
+    """Build the yt-dlp command, adding cookies if available."""
     cmd = [
         "yt-dlp",
         "--write-info-json",
         "--no-warnings",
         "--ignore-errors",
-        "--quiet",
-        # For slideshows, yt-dlp downloads each frame as an image
+        # realistic browser UA — helps avoid blocks on public posts
+        "--user-agent",
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+        "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
         "-o", str(out_dir / "%(id)s_%(playlist_index)s.%(ext)s"),
-        url,
     ]
+    # Prefer cookies file over browser extraction (works headlessly)
+    if COOKIES_FILE.exists():
+        cmd += ["--cookies", str(COOKIES_FILE)]
+    cmd.append(url)
+    return cmd
 
+
+def download(url: str, force: bool = False) -> dict | None:
+    """
+    Download a TikTok slideshow URL. Returns a record dict or None on failure.
+    Idempotent — if already downloaded successfully, returns existing record.
+    Set force=True to re-download even if already in DB.
+    Returns a dict with an extra '_error' key on failure so callers can show the reason.
+    """
+    init_db()
+    url = url.strip()
+    post_id = _extract_post_id(url)
+
+    if not force:
+        existing = get_post(post_id)
+        if existing and existing["status"] == "success":
+            print(f"  ↩  Already downloaded ({post_id}), skipping.")
+            existing["image_paths"] = json.loads(existing["image_paths"])
+            return existing
+
+    out_dir = OUT_ROOT / post_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    cmd = _build_cmd(url, out_dir)
     print(f"  ↓  Downloading {url}")
+
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        if result.returncode != 0 and not any(
-            out_dir.glob("*")
-        ):
-            print(f"  ✗  yt-dlp error: {result.stderr[:300]}")
-            return None
+        stderr = result.stderr.strip()
+        stdout = result.stdout.strip()
+
+        # Surface the real yt-dlp error for the UI
+        if result.returncode != 0 and not any(out_dir.glob("*")):
+            err_lines = [l for l in (stderr or stdout).splitlines()
+                         if "ERROR" in l or "error" in l.lower()]
+            err_msg = err_lines[0] if err_lines else (stderr or stdout or "unknown error")[:300]
+            print(f"  ✗  {err_msg}")
+            return {"_error": err_msg}
+
     except subprocess.TimeoutExpired:
-        print("  ✗  Download timed out.")
-        return None
+        return {"_error": "yt-dlp timed out after 120 s"}
 
     # Find info JSON
     info_files = list(out_dir.glob("*.info.json"))
