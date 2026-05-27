@@ -94,3 +94,53 @@ output/
 - The pipeline asks before continuing past any failed step
 - Up to 3 HeyGen video jobs run concurrently
 - Caption timing uses word-level Whisper timestamps for precise sync
+
+---
+
+# Editing Assistant (`editor/`)
+
+A separate pipeline that **cleans up your own talking-head footage** instead of
+generating synthetic clips. It removes fillers and dead air, tightens pacing,
+and burns captions — while preserving your natural delivery. It is an
+*assistant*: it proposes a cut map you review before anything renders.
+
+**Layers:** transcribe → annotate → cut map → *(human review)* → render → captions
+
+The **cut map** (`cutmap.json`) is the contract. Detection only *proposes*
+keep/cut segments; you can flip any `action` or add `"protect": true` to shield
+an emphasis/comedic pause. `render` only ever executes what the map says.
+
+### Requirements
+
+- `ffmpeg` + `ffprobe` on PATH
+- `OPENAI_API_KEY` in `.env` (Whisper transcription)
+
+### Usage
+
+```bash
+# Transcribe + build a proposed cut map, then stop for review
+python -m editor run path/to/video.mp4 --name my_clip
+
+# Inspect / hand-edit projects/my_clip/cutmap.json, then re-check
+python -m editor review my_clip
+
+# Render the edit + burn captions → projects/my_clip/out/
+python -m editor render my_clip
+
+# Skip review and render in one shot (quick tests)
+python -m editor run path/to/video.mp4 --name my_clip --render
+```
+
+Tunables (filler list, pause threshold, breathing pad, caption style) live in
+`editor/config.py`. Discourse-marker fillers ("like", "you know") are **off by
+default** to protect your voice — enable them per taste.
+
+### What's automated vs. deferred
+
+- **Automated now (deterministic):** filler removal, silence/dead-air trimming
+  with breathing pads, frame-accurate cuts, loudness normalization, word-level
+  captions remapped onto the edited timeline.
+- **Deferred (taste / packaging layers):** LLM pause classification
+  (dead air vs. dramatic), repeated-phrase tightening, hook/title generation,
+  vidIQ packaging, zoom-on-emphasis, reframing. These bolt onto the same cut
+  map without restructuring.

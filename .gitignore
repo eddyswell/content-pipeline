@@ -6,6 +6,9 @@ output/
 scenes/
 input/
 
+# Editing-assistant per-video workspaces (transcript, cut map, renders)
+projects/
+
 # Large asset files not needed for the app
 assets/*.mp4
 assets/music/

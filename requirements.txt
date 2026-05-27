@@ -1,6 +1,7 @@
 streamlit
 python-dotenv
 anthropic
+openai
 aiohttp
 aiofiles
 certifi
